@@ -75,7 +75,7 @@ def reconfigure(version):
             testing = None
             if 'letsencrypt.testing' in args:
                 testing = args['letsencrypt.testing']
-                if isinstance(testing, basestring):
+                if isinstance(testing, str):
                     testing = True if testing.lower() == 'true' else False
 
             client.process(args['letsencrypt.host'].split(','), args['letsencrypt.email'], testing=testing)
