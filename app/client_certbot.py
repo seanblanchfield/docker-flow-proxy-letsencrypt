@@ -87,6 +87,7 @@ class CertbotClient():
 
         if code != 0:
             logger.error('Certbot return code: {}. Skipping'.format(code))
+            logger.error('Certbot error stack:\n {}\n'.format(error)) 
             ret_error = True
             ret_created = False
 
