@@ -6,6 +6,7 @@ import os
 import requests
 import subprocess
 import time
+import threading
 
 from client_dfple import *
 from flask import Flask, request, send_from_directory
@@ -44,6 +45,7 @@ args = {
 }
 
 client = DFPLEClient(**args)
+reconfigure_lock = threading.Lock()
 
 app = Flask(__name__)
 
@@ -54,51 +56,56 @@ def acme_challenge(path):
 
 @app.route("/v<int:version>/docker-flow-proxy-letsencrypt/reconfigure")
 def reconfigure(version):
+    try:
+        args = request.args
+        logger.debug('Reconfigure called with values: %s', args)
+        reconfigure_lock.acquire()
+        dfp_client = DockerFlowProxyAPIClient()
 
-    dfp_client = DockerFlowProxyAPIClient()
-    args = request.args
+        if version != 1:
+            logger.error('Unable to use version : {}. Forwarding initial request to docker-flow-proxy service.'.format(version))
+        else:
 
-    if version != 1:
-        logger.error('Unable to use version : {}. Forwarding initial request to docker-flow-proxy service.'.format(version))
-    else:
+            logger.info('request for service: {}'.format(args.get('serviceName')))
 
-        logger.info('request for service: {}'.format(args.get('serviceName')))
+            # Check if the newly registered service is usign letsencrypt companion.
+            # Labels required:
+            #   * com.df.letsencrypt.host
+            #   * com.df.letsencrypt.email
+            required_labels = ('letsencrypt.host', 'letsencrypt.email')
+            if all([label in args.keys() for label in required_labels]):
+                logger.info('letsencrypt support enabled.')
 
-        # Check if the newly registered service is usign letsencrypt companion.
-        # Labels required:
-        #   * com.df.letsencrypt.host
-        #   * com.df.letsencrypt.email
-        required_labels = ('letsencrypt.host', 'letsencrypt.email')
-        if all([label in args.keys() for label in required_labels]):
-            logger.info('letsencrypt support enabled.')
+                testing = None
+                if 'letsencrypt.testing' in args:
+                    testing = args['letsencrypt.testing']
+                    if isinstance(testing, basestring):
+                        testing = True if testing.lower() == 'true' else False
 
-            testing = None
-            if 'letsencrypt.testing' in args:
-                testing = args['letsencrypt.testing']
-                if isinstance(testing, str):
-                    testing = True if testing.lower() == 'true' else False
+                client.process(args['letsencrypt.host'].split(','), args['letsencrypt.email'], testing=testing)
 
-            client.process(args['letsencrypt.host'].split(','), args['letsencrypt.email'], testing=testing)
+        # proxy requests to docker-flow-proxy
+        # sometimes we can get an error back from DFP, this can happen when DFP is not fully loaded.
+        # resend the request until response status code is 200 (${RETRY} times waiting ${RETRY_INTERVAL} seconds between retries)
+        t = 0
+        while t < os.environ.get('RETRY', 10):
+            t += 1
 
-    # proxy requests to docker-flow-proxy
-    # sometimes we can get an error back from DFP, this can happen when DFP is not fully loaded.
-    # resend the request until response status code is 200 (${RETRY} times waiting ${RETRY_INTERVAL} seconds between retries)
-    t = 0
-    while t < os.environ.get('RETRY', 10):
-        t += 1
+            logger.debug('forwarding request to docker-flow-proxy ({})'.format(t))
+            try:
+                response = dfp_client.get(dfp_client.url(version, '/reconfigure?{}'.format(
+                    '&'.join(['{}={}'.format(k, v) for k, v in request.args.items()]))))
+                if response.status_code == 200:
+                    break
+            except Exception as e:
+                logger.error('Error while trying to forward request: {}'.format(e))
+            logger.debug('waiting for retry')
+            time.sleep(os.environ.get('RETRY_INTERVAL', 5))
 
-        logger.debug('forwarding request to docker-flow-proxy ({})'.format(t))
-        try:
-            response = dfp_client.get(dfp_client.url(version, '/reconfigure?{}'.format(
-                '&'.join(['{}={}'.format(k, v) for k, v in request.args.items()]))))
-            if response.status_code == 200:
-                break
-        except Exception as e:
-            logger.error('Error while trying to forward request: {}'.format(e))
-        logger.debug('waiting for retry')
-        time.sleep(os.environ.get('RETRY_INTERVAL', 5))
-
-    return "OK"
+        return "OK"
+    finally:
+        logger.debug('Releasing reconfigure lock')
+        reconfigure_lock.release()
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=8080, debug=True, threaded=True)
